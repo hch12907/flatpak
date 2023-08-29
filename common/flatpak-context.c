@@ -104,6 +104,7 @@ flatpak_context_new (void)
   context->system_bus_policy = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
   context->generic_policy = g_hash_table_new_full (g_str_hash, g_str_equal,
                                                    g_free, (GDestroyNotify) g_strfreev);
+  context->launch_args = g_ptr_array_new_with_free_func (g_free);
 
   return context;
 }
@@ -117,6 +118,7 @@ flatpak_context_free (FlatpakContext *context)
   g_hash_table_destroy (context->session_bus_policy);
   g_hash_table_destroy (context->system_bus_policy);
   g_hash_table_destroy (context->generic_policy);
+  g_ptr_array_free (context->launch_args, TRUE);
   g_slice_free (FlatpakContext, context);
 }
 
@@ -421,6 +423,28 @@ flatpak_context_set_env_var (FlatpakContext *context,
                              const char     *value)
 {
   g_hash_table_insert (context->env_vars, g_strdup (name), g_strdup (value));
+}
+
+static void
+flatpak_context_add_extra_arg (FlatpakContext *context,
+                               const char     *arg)
+{
+  g_ptr_array_add(context->launch_args, g_strdup(arg));
+}
+
+static void
+flatpak_context_remove_extra_arg (FlatpakContext *context,
+                                  const char     *arg)
+{
+  /* FIXME: This doesn't work in command line. */
+  int i;
+
+  for (i = 0; i < context->launch_args->len; i++)
+    if (g_str_equal(g_ptr_array_index(context->launch_args, i), arg))
+      {
+        g_ptr_array_remove_index(context->launch_args, i);
+        break;
+      }
 }
 
 void
@@ -1029,6 +1053,8 @@ flatpak_context_merge (FlatpakContext *context,
       for (i = 0; policy_values[i] != NULL; i++)
         flatpak_context_apply_generic_policy (context, (char *) key, policy_values[i]);
     }
+
+  g_ptr_array_extend(context->launch_args, other->launch_args, (GCopyFunc) g_strdup, NULL);
 }
 
 static gboolean
@@ -1340,6 +1366,28 @@ option_unset_env_cb (const gchar *option_name,
 }
 
 static gboolean
+option_extra_arg_cb (const gchar *option_name,
+                     const gchar *value,
+                     gpointer     data,
+                     GError     **error)
+{
+  FlatpakContext *context = data;
+  flatpak_context_add_extra_arg (context, value);
+  return TRUE;
+}
+
+static gboolean
+option_unset_extra_arg_cb (const gchar *option_name,
+                     const gchar *value,
+                     gpointer     data,
+                     GError     **error)
+{
+  FlatpakContext *context = data;
+  flatpak_context_remove_extra_arg (context, value);
+  return TRUE;
+}
+
+static gboolean
 option_own_name_cb (const gchar *option_name,
                     const gchar *value,
                     gpointer     data,
@@ -1537,6 +1585,8 @@ static GOptionEntry context_options[] = {
   { "env", 0, G_OPTION_FLAG_IN_MAIN, G_OPTION_ARG_CALLBACK, &option_env_cb, N_("Set environment variable"), N_("VAR=VALUE") },
   { "env-fd", 0, G_OPTION_FLAG_IN_MAIN, G_OPTION_ARG_CALLBACK, &option_env_fd_cb, N_("Read environment variables in env -0 format from FD"), N_("FD") },
   { "unset-env", 0, G_OPTION_FLAG_IN_MAIN, G_OPTION_ARG_CALLBACK, &option_unset_env_cb, N_("Remove variable from environment"), N_("VAR") },
+  { "launch-arg", 0, G_OPTION_FLAG_IN_MAIN, G_OPTION_ARG_CALLBACK, &option_extra_arg_cb, N_("Pass an extra argument to the application on launch"), N_("ARG") },
+  { "unset-launch-arg", 0, G_OPTION_FLAG_IN_MAIN, G_OPTION_ARG_CALLBACK, &option_unset_extra_arg_cb, N_("Unset a launch argument"), N_("ARG") },
   { "own-name", 0, G_OPTION_FLAG_IN_MAIN, G_OPTION_ARG_CALLBACK, &option_own_name_cb, N_("Allow app to own name on the session bus"), N_("DBUS_NAME") },
   { "talk-name", 0, G_OPTION_FLAG_IN_MAIN, G_OPTION_ARG_CALLBACK, &option_talk_name_cb, N_("Allow app to talk to name on the session bus"), N_("DBUS_NAME") },
   { "no-talk-name", 0, G_OPTION_FLAG_IN_MAIN, G_OPTION_ARG_CALLBACK, &option_no_talk_name_cb, N_("Don't allow app to talk to name on the session bus"), N_("DBUS_NAME") },
@@ -1746,6 +1796,17 @@ flatpak_context_load_metadata (FlatpakContext *context,
       for (i = 0; persistent[i] != NULL; i++)
         if (!flatpak_context_set_persistent (context, persistent[i], error))
           return FALSE;
+    }
+
+  if (g_key_file_has_key (metakey, FLATPAK_METADATA_GROUP_CONTEXT, FLATPAK_METADATA_KEY_LAUNCH_ARGS, NULL))
+    {
+      g_auto(GStrv) launch_args = g_key_file_get_string_list (metakey, FLATPAK_METADATA_GROUP_CONTEXT,
+                                                             FLATPAK_METADATA_KEY_LAUNCH_ARGS, NULL, error);
+      if (launch_args == NULL)
+        return FALSE;
+
+      for (i = 0; launch_args[i] != NULL; i++)
+        flatpak_context_add_extra_arg (context, launch_args[i]);
     }
 
   if (g_key_file_has_group (metakey, FLATPAK_METADATA_GROUP_SESSION_BUS_POLICY))
@@ -2033,6 +2094,21 @@ flatpak_context_save_metadata (FlatpakContext *context,
                              NULL);
     }
 
+  if (context->launch_args->len > 0)
+    {
+      g_key_file_set_string_list (metakey, FLATPAK_METADATA_GROUP_CONTEXT,
+                                  FLATPAK_METADATA_KEY_LAUNCH_ARGS,
+                                  (const char * const *) context->launch_args->pdata,
+                                  context->launch_args->len);
+    }
+  else
+    {
+      g_key_file_remove_key (metakey,
+                        FLATPAK_METADATA_GROUP_CONTEXT,
+                        FLATPAK_METADATA_KEY_LAUNCH_ARGS,
+                        NULL);
+    }
+
   g_key_file_remove_group (metakey, FLATPAK_METADATA_GROUP_SESSION_BUS_POLICY, NULL);
   g_hash_table_iter_init (&iter, context->session_bus_policy);
   while (g_hash_table_iter_next (&iter, &key, &value))
@@ -2293,6 +2369,7 @@ flatpak_context_to_args (FlatpakContext *context,
 {
   GHashTableIter iter;
   gpointer key, value;
+  int i;
 
   flatpak_context_shared_to_args (context->shares, context->shares_valid, args);
   flatpak_context_sockets_to_args (context->sockets, context->sockets_valid, args);
@@ -2306,6 +2383,11 @@ flatpak_context_to_args (FlatpakContext *context,
         g_ptr_array_add (args, g_strdup_printf ("--env=%s=%s", (char *) key, (char *) value));
       else
         g_ptr_array_add (args, g_strdup_printf ("--unset-env=%s", (char *) key));
+    }
+
+  for (i = 0; i < context->launch_args->len; i++)
+    {
+      g_ptr_array_add (args, g_strdup_printf ("--launch-arg=%s", (char *) g_ptr_array_index (context->launch_args, i)));
     }
 
   g_hash_table_iter_init (&iter, context->persistent);
@@ -2410,6 +2492,7 @@ void
 flatpak_context_reset_non_permissions (FlatpakContext *context)
 {
   g_hash_table_remove_all (context->env_vars);
+  g_ptr_array_remove_range(context->launch_args, 0, context->launch_args->len);
 }
 
 void

@@ -83,6 +83,7 @@ struct FlatpakContext
   GHashTable            *session_bus_policy;
   GHashTable            *system_bus_policy;
   GHashTable            *generic_policy;
+  GPtrArray             *launch_args;
 };
 
 extern const char *flatpak_context_sockets[];

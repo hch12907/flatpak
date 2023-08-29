@@ -3340,6 +3340,18 @@ flatpak_run_app (FlatpakDecomposed *app_ref,
 
   flatpak_bwrap_add_arg (bwrap, command);
 
+  if (app_context->launch_args->len > 0)
+    {
+      char **launch_args = (char **) app_context->launch_args->pdata;
+      gssize launch_arg_len = app_context->launch_args->len;
+      if (!add_rest_args (bwrap, app_id,
+                          exports, (flags & FLATPAK_RUN_FLAG_FILE_FORWARDING) != 0,
+                          doc_mount_path,
+                          launch_args, launch_arg_len, error))
+        return FALSE;
+    }
+  
+  printf("[DEBUG] Received %d command line arg(s). The first one is '%s'\n", n_args, args ? args[0] : "(NULL)");
   if (!add_rest_args (bwrap, app_id,
                       exports, (flags & FLATPAK_RUN_FLAG_FILE_FORWARDING) != 0,
                       doc_mount_path,
@@ -3352,6 +3364,7 @@ flatpak_run_app (FlatpakDecomposed *app_ref,
   flatpak_bwrap_finish (bwrap);
 
   commandline = flatpak_quote_argv ((const char **) bwrap->argv->pdata, -1);
+  printf("[DEBUG] Running '%s'\n", commandline);
   g_info ("Running '%s'", commandline);
 
   if ((flags & (FLATPAK_RUN_FLAG_BACKGROUND)) != 0 ||
